@@ -33,14 +33,6 @@ data class PassFilter(
     val slope: Slope = Slope.DB12,
 )
 
-/** Reverb per kanal: [mix] 0-1 (basah/kering), [room] ukuran ruang 0-1, [damping] peredam nada tinggi 0-1. */
-data class ReverbSettings(
-    val enabled: Boolean = false,
-    val mix: Float = 0.3f,
-    val room: Float = 0.6f,
-    val damping: Float = 0.5f,
-)
-
 /** Seluruh pengaturan satu kanal (L atau R). */
 data class ChannelSettings(
     val gainDb: Float = 0f,
@@ -52,7 +44,6 @@ data class ChannelSettings(
     val reverbMix: Float = 0.3f,
     val reverbSize: Float = 0.6f,
     val bands: List<EqBand> = defaultBands(),
-    val reverb: ReverbSettings = ReverbSettings(),
 ) {
     fun withBand(index: Int, f: (EqBand) -> EqBand): ChannelSettings =
         copy(bands = bands.mapIndexed { i, b -> if (i == index) f(b) else b })
@@ -113,24 +104,6 @@ fun passFilterFromJson(o: JSONObject?, default: PassFilter): PassFilter {
     )
 }
 
-fun ReverbSettings.toJson(): JSONObject = JSONObject().apply {
-    put("on", enabled)
-    put("mix", mix.toDouble())
-    put("room", room.toDouble())
-    put("damp", damping.toDouble())
-}
-
-fun reverbFromJson(o: JSONObject?): ReverbSettings {
-    val d = ReverbSettings()
-    if (o == null) return d
-    return ReverbSettings(
-        enabled = o.optBoolean("on", d.enabled),
-        mix = o.optDouble("mix", d.mix.toDouble()).toFloat(),
-        room = o.optDouble("room", d.room.toDouble()).toFloat(),
-        damping = o.optDouble("damp", d.damping.toDouble()).toFloat(),
-    )
-}
-
 fun ChannelSettings.toJson(): JSONObject = JSONObject().apply {
     put("gain", gainDb.toDouble())
     put("pol", polarityInverted)
@@ -141,7 +114,6 @@ fun ChannelSettings.toJson(): JSONObject = JSONObject().apply {
     put("hpf", hpf.toJson())
     put("lpf", lpf.toJson())
     put("bands", JSONArray().also { arr -> bands.forEach { arr.put(it.toJson()) } })
-    put("reverb", reverb.toJson())
 }
 
 fun channelSettingsFromJson(o: JSONObject): ChannelSettings {
@@ -162,6 +134,5 @@ fun channelSettingsFromJson(o: JSONObject): ChannelSettings {
         hpf = passFilterFromJson(o.optJSONObject("hpf"), d.hpf),
         lpf = passFilterFromJson(o.optJSONObject("lpf"), d.lpf),
         bands = bands,
-        reverb = reverbFromJson(o.optJSONObject("reverb")),
     )
 }
