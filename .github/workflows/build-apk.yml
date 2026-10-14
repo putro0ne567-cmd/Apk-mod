@@ -27,7 +27,7 @@ jobs:
           mv -f app-build.gradle.kts app/build.gradle.kts
           mv -f root-build.gradle.kts build.gradle.kts
 
-            - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
