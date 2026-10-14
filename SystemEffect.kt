@@ -1,5 +1,9 @@
 package com.stereodsp.audio
 
+import android.content.Context
+import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
 import android.media.audiofx.DynamicsProcessing
 import android.media.audiofx.PresetReverb
 import com.stereodsp.dsp.ChannelSettings
@@ -9,25 +13,29 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.sqrt
 
 /**
- * Efek global (audio session 0 = seluruh output perangkat) berbasis [DynamicsProcessing],
- * sehingga suara aplikasi lain (YouTube, dll.) ikut diproses.
+ * Efek untuk aplikasi lain (YouTube dll.). Efek [DynamicsProcessing] dipasang langsung ke
+ * setiap sesi audio yang sedang aktif (dicari oleh [SessionFinder]); session 0 (global)
+ * juga dicoba, tetapi banyak perangkat mengabaikannya.
  *
  * Pemetaan dari pengaturan per kanal:
  *  - Gain / Mute  -> input gain per kanal (mute = -80 dB)
  *  - HPF / LPF    -> crossover 3 band MBC; band bawah/atas dibisukan (slope tetap 24 dB/okt)
  *  - EQ 10 band   -> Pre-EQ 10 band (pendekatan: tipe peak/shelf tidak dibedakan, Q diabaikan)
  *  - Polaritas    -> tidak didukung di mode ini
- *  - Reverb       -> PresetReverb global (tidak bisa per kanal: aktif bila L atau R menyalakan reverb)
- *
- * Catatan: sebagian perangkat/versi Android membatasi efek global; bila gagal, [error] terisi.
+ *  - Reverb       -> PresetReverb (tidak per kanal: aktif bila L atau R menyalakan reverb)
  */
 object SystemEffect {
     private const val MUTE_DB = -80f
     private const val TOP_EDGE = 22000f
     private const val EQ_BANDS = ChannelSettings.BAND_COUNT
 
-    private var dp: DynamicsProcessing? = null
-    private var reverb: PresetReverb? = null
+    private class Chain(val session: Int, val dp: DynamicsProcessing, var reverb: PresetReverb?)
+
+    private val chains = HashMap<Int, Chain>()
+    private var left = ChannelSettings()
+    private var right = ChannelSettings()
+    private var muteL = false
+    private var muteR = false
 
     private val _active = MutableStateFlow(false)
     val active: StateFlow<Boolean> = _active.asStateFlow()
@@ -35,75 +43,103 @@ object SystemEffect {
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /** Jumlah sesi audio aplikasi lain yang sedang diberi efek (tidak termasuk session 0). */
+    private val _sessions = MutableStateFlow(0)
+    val sessions: StateFlow<Int> = _sessions.asStateFlow()
+
     @Synchronized
-    fun start(l: ChannelSettings, r: ChannelSettings, muteL: Boolean, muteR: Boolean): Boolean {
-        if (dp == null) {
-            try {
-                val cfg = DynamicsProcessing.Config.Builder(
-                    DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
-                    2,
-                    true, EQ_BANDS,
-                    true, 3,
-                    false, 0,
-                    false,
-                ).build()
-                val d = DynamicsProcessing(0, 0, cfg)
-                dp = d
-                applyAll(d, l, r, muteL, muteR)
-                d.setEnabled(true)
-            } catch (e: Throwable) {
-                try { dp?.release() } catch (_: Throwable) {}
-                dp = null
-                _active.value = false
-                _error.value = "Perangkat ini tidak mengizinkan efek untuk semua aplikasi (${e.javaClass.simpleName})"
-                return false
-            }
-        } else {
-            update(l, r, muteL, muteR)
-        }
+    fun start(l: ChannelSettings, r: ChannelSettings, mL: Boolean, mR: Boolean): Boolean {
+        left = l; right = r; muteL = mL; muteR = mR
         _error.value = null
         _active.value = true
+        if (!chains.containsKey(0)) attach(0, quiet = true)
         return true
     }
 
     @Synchronized
-    fun update(l: ChannelSettings, r: ChannelSettings, muteL: Boolean, muteR: Boolean) {
-        val d = dp ?: return
-        try {
-            applyAll(d, l, r, muteL, muteR)
-        } catch (e: Throwable) {
-            _error.value = "Gagal memperbarui efek: ${e.javaClass.simpleName}"
+    fun update(l: ChannelSettings, r: ChannelSettings, mL: Boolean, mR: Boolean) {
+        left = l; right = r; muteL = mL; muteR = mR
+        if (!_active.value) return
+        val iter = chains.entries.iterator()
+        while (iter.hasNext()) {
+            val e = iter.next()
+            try {
+                applyAll(e.value)
+            } catch (_: Throwable) {
+                release(e.value)
+                iter.remove()
+            }
         }
+        _sessions.value = chains.keys.count { it != 0 }
+    }
+
+    /** Samakan sesi yang diberi efek dengan daftar [ids] sesi audio yang sedang aktif. */
+    @Synchronized
+    fun sync(ids: Set<Int>) {
+        if (!_active.value) return
+        val gone = chains.keys.filter { it != 0 && it !in ids }
+        for (id in gone) chains.remove(id)?.let { release(it) }
+        for (id in ids) if (id > 0 && !chains.containsKey(id)) attach(id, quiet = true)
+        _sessions.value = chains.keys.count { it != 0 }
     }
 
     @Synchronized
     fun stop() {
-        try { reverb?.release() } catch (_: Throwable) {}
-        reverb = null
-        try { dp?.setEnabled(false) } catch (_: Throwable) {}
-        try { dp?.release() } catch (_: Throwable) {}
-        dp = null
+        chains.values.forEach { release(it) }
+        chains.clear()
+        _sessions.value = 0
         _active.value = false
     }
 
-    private fun applyAll(d: DynamicsProcessing, l: ChannelSettings, r: ChannelSettings, mL: Boolean, mR: Boolean) {
-        applyChannel(d, 0, l, mL)
-        applyChannel(d, 1, r, mR)
-        applyReverb(l, r)
+    private fun release(c: Chain) {
+        try { c.reverb?.release() } catch (_: Throwable) {}
+        try { c.dp.setEnabled(false) } catch (_: Throwable) {}
+        try { c.dp.release() } catch (_: Throwable) {}
     }
 
-    private fun applyReverb(l: ChannelSettings, r: ChannelSettings) {
+    private fun attach(session: Int, quiet: Boolean) {
+        try {
+            val cfg = DynamicsProcessing.Config.Builder(
+                DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
+                2,
+                true, EQ_BANDS,
+                true, 3,
+                false, 0,
+                false,
+            ).build()
+            val d = DynamicsProcessing(0, session, cfg)
+            val chain = Chain(session, d, null)
+            try {
+                applyAll(chain)
+                d.setEnabled(true)
+            } catch (e: Throwable) {
+                release(chain)
+                throw e
+            }
+            chains[session] = chain
+        } catch (e: Throwable) {
+            if (!quiet) _error.value = "Gagal memasang efek: ${e.javaClass.simpleName}"
+        }
+    }
+
+    private fun applyAll(c: Chain) {
+        applyChannel(c.dp, 0, left, muteL)
+        applyChannel(c.dp, 1, right, muteR)
+        applyReverb(c)
+    }
+
+    private fun applyReverb(c: Chain) {
         val src = when {
-            l.reverbEnabled -> l
-            r.reverbEnabled -> r
+            left.reverbEnabled -> left
+            right.reverbEnabled -> right
             else -> null
         }
         if (src == null) {
-            try { reverb?.setEnabled(false) } catch (_: Throwable) {}
+            try { c.reverb?.setEnabled(false) } catch (_: Throwable) {}
             return
         }
         try {
-            val rv = reverb ?: PresetReverb(0, 0).also { reverb = it }
+            val rv = c.reverb ?: PresetReverb(0, c.session).also { c.reverb = it }
             rv.preset = when {
                 src.reverbSize < 0.2f -> PresetReverb.PRESET_SMALLROOM
                 src.reverbSize < 0.4f -> PresetReverb.PRESET_MEDIUMROOM
@@ -112,9 +148,8 @@ object SystemEffect {
                 else -> PresetReverb.PRESET_LARGEHALL
             }
             rv.setEnabled(true)
-        } catch (e: Throwable) {
-            reverb = null
-            _error.value = "Reverb global tidak didukung perangkat ini"
+        } catch (_: Throwable) {
+            c.reverb = null
         }
     }
 
@@ -151,4 +186,57 @@ object SystemEffect {
         -90f, 1f,     // noise gate, expander ratio
         0f, postGain, // pre gain, post gain
     )
+}
+
+/** Mencari ID sesi audio dari aplikasi yang sedang/baru saja memutar suara. */
+object SessionFinder {
+    private val sessionRegex = Regex("""session(?:Id)?\s*[:=]\s*(\d+)""", RegexOption.IGNORE_CASE)
+
+    fun hasDump(ctx: Context): Boolean =
+        ctx.checkSelfPermission("android.permission.DUMP") == PackageManager.PERMISSION_GRANTED
+
+    fun find(ctx: Context): Set<Int> {
+        val out = HashSet<Int>()
+        // 1) API publik + refleksi (tanpa izin khusus; tidak tersedia di semua versi Android)
+        try {
+            val am = ctx.getSystemService(AudioManager::class.java)
+            for (c in am.activePlaybackConfigurations) {
+                for (name in arrayOf("getAudioSessionId", "getSessionId")) {
+                    try {
+                        val v = AudioPlaybackConfiguration::class.java.getMethod(name).invoke(c) as? Int
+                        if (v != null && v > 0) {
+                            out.add(v)
+                            break
+                        }
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        // 2) dumpsys audio (butuh izin DUMP yang diberikan sekali lewat ADB)
+        if (hasDump(ctx)) out.addAll(fromDumpsys())
+        return out
+    }
+
+    private fun fromDumpsys(): Set<Int> {
+        val ids = HashSet<Int>()
+        var p: Process? = null
+        try {
+            p = Runtime.getRuntime().exec(arrayOf("dumpsys", "audio"))
+            p.inputStream.bufferedReader().useLines { lines ->
+                for (line in lines) {
+                    if (!line.contains("AudioPlaybackConfiguration")) continue
+                    if (line.contains("released", ignoreCase = true)) continue
+                    val m = sessionRegex.find(line) ?: continue
+                    val id = m.groupValues[1].toIntOrNull() ?: continue
+                    if (id > 0) ids.add(id)
+                }
+            }
+        } catch (_: Throwable) {
+        } finally {
+            try { p?.destroy() } catch (_: Throwable) {}
+        }
+        return ids
+    }
 }

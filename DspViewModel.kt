@@ -37,6 +37,7 @@ class DspViewModel(app: Application) : AndroidViewModel(app) {
     /** True bila efek berlaku untuk seluruh aplikasi (YouTube dll.). */
     val systemOn: StateFlow<Boolean> = SystemEffect.active
     val systemError: StateFlow<String?> = SystemEffect.error
+    val sessionCount: StateFlow<Int> = SystemEffect.sessions
 
     init {
         pushToEngine()

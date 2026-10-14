@@ -19,7 +19,32 @@ import com.stereodsp.dsp.ChannelSettings
 /** Menjaga efek global tetap hidup saat pengguna berpindah ke YouTube / aplikasi lain. */
 class SystemEffectService : Service() {
 
+    @Volatile private var polling = false
+    private var poller: Thread? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /** Memeriksa sesi audio aplikasi lain tiap ~2 detik dan memasang efek ke sesi baru. */
+    private fun startPolling() {
+        if (polling) return
+        polling = true
+        poller = Thread({
+            while (polling) {
+                try {
+                    SystemEffect.sync(SessionFinder.find(applicationContext))
+                } catch (_: Throwable) {
+                }
+                try {
+                    Thread.sleep(2000)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+        }, "dsp-session-poller").also {
+            it.isDaemon = true
+            it.start()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -58,10 +83,13 @@ class SystemEffectService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        startPolling()
         return START_STICKY
     }
 
     override fun onDestroy() {
+        polling = false
+        poller?.interrupt()
         SystemEffect.stop()
         super.onDestroy()
     }

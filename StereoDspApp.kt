@@ -48,6 +48,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.stereodsp.DspViewModel
 import com.stereodsp.audio.PlayerState
+import com.stereodsp.audio.SessionFinder
 import com.stereodsp.dsp.BandType
 import com.stereodsp.dsp.Channel
 import com.stereodsp.dsp.ChannelSettings
@@ -69,6 +70,7 @@ fun StereoDspApp(vm: DspViewModel) {
     val muteR by vm.muteR.collectAsStateWithLifecycle()
     val systemOn by vm.systemOn.collectAsStateWithLifecycle()
     val systemError by vm.systemError.collectAsStateWithLifecycle()
+    val sessionCount by vm.sessionCount.collectAsStateWithLifecycle()
     val player by vm.engine.state.collectAsStateWithLifecycle()
     var tab by remember { mutableIntStateOf(0) }
     val context = LocalContext.current
@@ -99,7 +101,7 @@ fun StereoDspApp(vm: DspViewModel) {
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            SystemCard(systemOn, systemError, toggleSystem)
+            SystemCard(systemOn, systemError, sessionCount, toggleSystem)
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MuteButton("L", muteL, Modifier.weight(1f)) { vm.setMute(Channel.LEFT, it) }
@@ -143,7 +145,8 @@ fun StereoDspApp(vm: DspViewModel) {
 // ---------------------------------------------------------------- Efek global & mute
 
 @Composable
-private fun SystemCard(on: Boolean, error: String?, onToggle: (Boolean) -> Unit) {
+private fun SystemCard(on: Boolean, error: String?, sessions: Int, onToggle: (Boolean) -> Unit) {
+    val hasDump = SessionFinder.hasDump(LocalContext.current)
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -157,6 +160,18 @@ private fun SystemCard(on: Boolean, error: String?, onToggle: (Boolean) -> Unit)
                 Switch(checked = on, onCheckedChange = onToggle)
             }
             if (on) {
+                Text(
+                    if (sessions > 0) "Terhubung ke $sessions sesi audio aplikasi lain."
+                    else "Belum ada aplikasi terdeteksi. Putar video/musik di aplikasi lain.",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                if (sessions == 0 && !hasDump) {
+                    Text(
+                        "Android tidak memberi daftar sesi audio ke aplikasi biasa. Beri izin sekali lewat ADB: " +
+                            "adb shell pm grant com.stereodsp android.permission.DUMP, lalu matikan dan nyalakan lagi sakelar ini.",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
                 Text(
                     "Mode ini: EQ didekati (tanpa beda peak/shelf & Q), slope HPF/LPF tetap 24 dB/okt, polaritas tidak berlaku, reverb berlaku untuk kedua kanal (preset ruang, tanpa mix).",
                     style = MaterialTheme.typography.labelSmall,
